@@ -2091,6 +2091,13 @@ static inline void liveness_calc(block_t *block)
             /* ADDI + BNE: rs1 is source */
             liveness[ir->rs1] = idx;
             break;
+        case rv_insn_fuse13:
+        case rv_insn_fuse14:
+            /* Interpreter-only fusions: pattern matching avoids these in JIT
+             * builds, so they should never reach JIT liveness analysis.
+             */
+            __UNREACHABLE;
+            break;
         default:
             __UNREACHABLE;
         }
@@ -2827,6 +2834,20 @@ static void do_fuse12(struct jit_state *state, riscv_t *rv, rv_insn_t *ir)
     emit_load_imm(state, temp_reg, ir->pc + 4 + ir->imm2);
     emit_store(state, S32, temp_reg, parameter_reg[0], offsetof(riscv_t, PC));
     emit_exit(state);
+}
+
+static void do_fuse13(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse14(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
 }
 
 /* clang-format off */

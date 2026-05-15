@@ -863,7 +863,8 @@ static inline bool fuse_next_or_stop(riscv_t *rv,
     const rv_insn_t *next = ir->next;
 #ifdef WASM_DEBUG_BLOCKS
     /* Validate: fused sequences shouldn't have branch targets.
-     * fuse6 (ECALL) and fuse12 (ADDI+BNE) bypass this path entirely. */
+     * fuse6 (ECALL), fuse12 (ADDI+BNE), and branch fusions bypass this path.
+     */
     assert(!ir->branch_taken && !ir->branch_untaken &&
            "Fused ops in fuse_next_or_stop must be intra-block");
 #endif
@@ -1192,6 +1193,114 @@ static PRESERVE_NONE bool do_fuse12(riscv_t *rv,
     return true;
 }
 
+static inline bool fuse_branch_taken(const opcode_fuse_t *branch,
+                                     const uint32_t *X)
+{
+    switch (branch->opcode) {
+    case rv_insn_beq:
+        return X[branch->rs1] == X[branch->rs2];
+    case rv_insn_bne:
+        return X[branch->rs1] != X[branch->rs2];
+    case rv_insn_blt:
+        return (int32_t) X[branch->rs1] < (int32_t) X[branch->rs2];
+    case rv_insn_bge:
+        return (int32_t) X[branch->rs1] >= (int32_t) X[branch->rs2];
+    case rv_insn_bltu:
+        return X[branch->rs1] < X[branch->rs2];
+    case rv_insn_bgeu:
+        return X[branch->rs1] >= X[branch->rs2];
+    default:
+        __UNREACHABLE;
+        return false;
+    }
+}
+
+static inline bool fuse_branch_finish(riscv_t *rv,
+                                      const rv_insn_t *ir,
+                                      uint64_t cycle,
+                                      uint32_t PC,
+                                      const opcode_fuse_t *branch,
+                                      uint32_t branch_pc,
+                                      uint32_t fallthrough_pc)
+{
+    if (fuse_branch_taken(branch, rv->X)) {
+        is_branch_taken = true;
+        PC = branch_pc + branch->imm;
+#if !RV32_HAS(EXT_C)
+        RV_EXC_MISALIGN_HANDLER(branch_pc, INSN, false, 0);
+#endif
+        struct rv_insn *taken = ir->branch_taken;
+        if (taken) {
+#if RV32_HAS(SYSTEM)
+            if (!rv->is_trapped) {
+                last_pc = PC;
+                RVOP_TAIL(rv, taken, cycle, PC);
+            }
+#else
+            last_pc = PC;
+            RVOP_TAIL(rv, taken, cycle, PC);
+#endif
+        }
+    } else {
+        is_branch_taken = false;
+        PC = fallthrough_pc;
+        struct rv_insn *untaken = ir->branch_untaken;
+        if (untaken) {
+#if RV32_HAS(SYSTEM)
+            if (!rv->is_trapped) {
+                last_pc = PC;
+                RVOP_TAIL(rv, untaken, cycle, PC);
+            }
+#else
+            last_pc = PC;
+            RVOP_TAIL(rv, untaken, cycle, PC);
+#endif
+        }
+    }
+
+    rv->csr_cycle = cycle;
+    rv->PC = PC;
+    return true;
+}
+
+/* fused ADDI + ADDI + BNE:
+ * addi rd0, rs10, imm0; addi rd1, rs11, imm1; bne rd1, x0, offset
+ */
+static PRESERVE_NONE bool do_fuse13(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 3;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    rv->X[fuse[0].rd] =
+        (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
+    rv->X[fuse[1].rd] =
+        (uint32_t) rv->X[fuse[1].rs1] + (uint32_t) fuse[1].imm;
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[2], PC + 8, PC + 12);
+}
+
+/* fused ADDI + conditional branch:
+ * addi rd, rs1, imm; branch ..., offset
+ */
+static PRESERVE_NONE bool do_fuse14(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 2;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    rv->X[fuse[0].rd] =
+        (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[1], PC + 4, PC + 8);
+}
+
 /* clang-format off */
 static const void *dispatch_table[] = {
     /* RV32 instructions */
@@ -1420,6 +1529,12 @@ static inline int count_consecutive_insn(rv_insn_t *ir, uint8_t opcode)
 static inline bool is_shift_imm(const rv_insn_t *ir)
 {
     return IF_insn(ir, slli) || IF_insn(ir, srli) || IF_insn(ir, srai);
+}
+
+static inline bool is_conditional_branch(const rv_insn_t *ir)
+{
+    return IF_insn(ir, beq) || IF_insn(ir, bne) || IF_insn(ir, blt) ||
+           IF_insn(ir, bge) || IF_insn(ir, bltu) || IF_insn(ir, bgeu);
 }
 
 /* Count consecutive shift immediate instructions */
@@ -1786,6 +1901,32 @@ static void match_pattern(riscv_t *rv, block_t *block)
                 break;
             }
 #endif
+#if !RV32_HAS(JIT)
+            /* ADDI + ADDI + BNE:
+             * Common pointer/countdown loop shape:
+             *   addi ptr, ptr, step
+             *   addi count, count, -1
+             *   bne count, x0, loop
+             *
+             * Keep this before fuse7 so the two ADDIs are not folded into a
+             * non-branch fusion first.
+             */
+            if (next_ir && IF_insn(next_ir, addi)) {
+                rv_insn_t *branch_ir = next_ir->next;
+                if (branch_ir && IF_insn(branch_ir, bne) &&
+                    next_ir->rd != rv_reg_zero &&
+                    next_ir->rd == branch_ir->rs1 &&
+                    branch_ir->rs2 == rv_reg_zero) {
+                    struct rv_insn *branch_taken = branch_ir->branch_taken;
+                    struct rv_insn *branch_untaken = branch_ir->branch_untaken;
+                    if (try_fuse_sequence(rv, block, ir, 3, rv_insn_fuse13)) {
+                        ir->branch_taken = branch_taken;
+                        ir->branch_untaken = branch_untaken;
+                        break;
+                    }
+                }
+            }
+#endif
             /* ADDI + BNE loop counter fusion (fuse12):
              * addi rd, rs1, imm; bne rd, x0, offset
              * Common pattern for countdown loops.
@@ -1802,6 +1943,23 @@ static void match_pattern(riscv_t *rv, block_t *block)
                 remove_next_nth_ir(rv, ir, block, 1);
                 break;
             }
+#if !RV32_HAS(JIT)
+            /* ADDI + conditional branch.
+             * The ADDI result must be consumed by the branch condition.
+             * This generalizes fuse12 to BEQ/BLT/BGE/BLTU/BGEU loop tests.
+             */
+            if (next_ir && is_conditional_branch(next_ir) &&
+                ir->rd != rv_reg_zero &&
+                (ir->rd == next_ir->rs1 || ir->rd == next_ir->rs2)) {
+                struct rv_insn *branch_taken = next_ir->branch_taken;
+                struct rv_insn *branch_untaken = next_ir->branch_untaken;
+                if (try_fuse_sequence(rv, block, ir, 2, rv_insn_fuse14)) {
+                    ir->branch_taken = branch_taken;
+                    ir->branch_untaken = branch_untaken;
+                    break;
+                }
+            }
+#endif
             /* Multiple ADDI fusion (fuse7) */
             count = count_consecutive_insn(ir, rv_insn_addi);
 #if RV32_HAS(SYSTEM_MMIO)

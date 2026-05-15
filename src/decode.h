@@ -252,7 +252,9 @@ enum op_field {
     _(fuse9)           \
     _(fuse10)          \
     _(fuse11)          \
-    _(fuse12)
+    _(fuse12)          \
+    _(fuse13)          \
+    _(fuse14)
 
 /* Fusion pattern descriptions:
  * fuse1:  Multiple LUI              - Batch upper immediate loads
@@ -267,6 +269,8 @@ enum op_field {
  * fuse10: LUI + SW                  - Absolute/PC-relative store
  * fuse11: LW + ADDI (post-inc)      - Load with pointer increment
  * fuse12: ADDI + BNE                - Loop counter decrement-branch
+ * fuse13: ADDI + ADDI + BNE         - Pointer bump + countdown branch
+ * fuse14: ADDI + branch             - Counter update + conditional branch
  */
 
 /* clang-format off */

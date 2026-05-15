@@ -1708,3 +1708,7 @@ T2C_OP(fuse12, {
     }
     LLVMBuildCondBr(*builder, cmp, taken, untaken);
 })
+
+T2C_OP(fuse13, { __UNREACHABLE; })
+
+T2C_OP(fuse14, { __UNREACHABLE; })
