@@ -2093,6 +2093,11 @@ static inline void liveness_calc(block_t *block)
             break;
         case rv_insn_fuse13:
         case rv_insn_fuse14:
+        case rv_insn_fuse15:
+        case rv_insn_fuse16:
+        case rv_insn_fuse17:
+        case rv_insn_fuse18:
+        case rv_insn_fuse19:
             /* Interpreter-only fusions: pattern matching avoids these in JIT
              * builds, so they should never reach JIT liveness analysis.
              */
@@ -2844,6 +2849,41 @@ static void do_fuse13(struct jit_state *state UNUSED,
 }
 
 static void do_fuse14(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse15(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse16(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse17(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse18(struct jit_state *state UNUSED,
+                      riscv_t *rv UNUSED,
+                      rv_insn_t *ir UNUSED)
+{
+    __UNREACHABLE;
+}
+
+static void do_fuse19(struct jit_state *state UNUSED,
                       riscv_t *rv UNUSED,
                       rv_insn_t *ir UNUSED)
 {

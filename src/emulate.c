@@ -1215,13 +1215,13 @@ static inline bool fuse_branch_taken(const opcode_fuse_t *branch,
     }
 }
 
-static inline bool fuse_branch_finish(riscv_t *rv,
-                                      const rv_insn_t *ir,
-                                      uint64_t cycle,
-                                      uint32_t PC,
-                                      const opcode_fuse_t *branch,
-                                      uint32_t branch_pc,
-                                      uint32_t fallthrough_pc)
+FORCE_INLINE bool fuse_branch_finish(riscv_t *rv,
+                                     const rv_insn_t *ir,
+                                     uint64_t cycle,
+                                     uint32_t PC,
+                                     const opcode_fuse_t *branch,
+                                     uint32_t branch_pc,
+                                     uint32_t fallthrough_pc)
 {
     if (fuse_branch_taken(branch, rv->X)) {
         is_branch_taken = true;
@@ -1299,6 +1299,135 @@ static PRESERVE_NONE bool do_fuse14(riscv_t *rv,
         (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
 
     return fuse_branch_finish(rv, ir, cycle, PC, &fuse[1], PC + 4, PC + 8);
+}
+
+/* fused SB + ADD + SUB + BLT:
+ * sb rs2, imm(rs1); add rd1, rs1, step; sub rd2, rd1, base;
+ * blt rd2, limit, offset
+ */
+static PRESERVE_NONE bool do_fuse15(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 4;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    uint32_t addr = (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
+    uint32_t value = rv->X[fuse[0].rs2];
+    MEM_WRITE_B(rv, addr, value);
+#if RV32_HAS(ARCH_TEST)
+    check_tohost_write(rv, addr, value);
+#endif
+
+    rv->X[fuse[1].rd] = rv->X[fuse[1].rs1] + rv->X[fuse[1].rs2];
+    rv->X[fuse[2].rd] = rv->X[fuse[2].rs1] - rv->X[fuse[2].rs2];
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[3], PC + 12, PC + 16);
+}
+
+/* fused LBU + BEQ/BNE:
+ * lbu rd, imm(rs1); beq/bne rd, rs2, offset
+ */
+static PRESERVE_NONE bool do_fuse16(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 2;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    uint32_t addr = (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
+    rv->X[fuse[0].rd] = MEM_READ_B(rv, addr);
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[1], PC + 4, PC + 8);
+}
+
+/* fused ADD + LBU + BEQ/BNE:
+ * add addr, base, index; lbu rd, imm(addr); beq/bne rd, rs2, offset
+ */
+static PRESERVE_NONE bool do_fuse17(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 3;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    rv->X[fuse[0].rd] = rv->X[fuse[0].rs1] + rv->X[fuse[0].rs2];
+    uint32_t addr = (uint32_t) rv->X[fuse[1].rs1] + (uint32_t) fuse[1].imm;
+    rv->X[fuse[1].rd] = MEM_READ_B(rv, addr);
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[2], PC + 8, PC + 12);
+}
+
+/* fused Fibonacci-style loop body:
+ * add sum, a, b; sw sum, imm(ptr); addi a, b, 0; addi b, sum, 0;
+ * addi ptr, ptr, step; addi count, count, -1; bne count, x0, offset
+ */
+static PRESERVE_NONE bool do_fuse18(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 7;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    rv->X[fuse[0].rd] = rv->X[fuse[0].rs1] + rv->X[fuse[0].rs2];
+
+    uint32_t addr = (uint32_t) rv->X[fuse[1].rs1] + (uint32_t) fuse[1].imm;
+    uint32_t value = rv->X[fuse[1].rs2];
+    RV_EXC_MISALIGN_HANDLER(3, STORE, false, 1);
+    MEM_WRITE_W(rv, addr, value);
+#if RV32_HAS(ARCH_TEST)
+    check_tohost_write(rv, addr, value);
+#endif
+
+    rv->X[fuse[2].rd] =
+        (uint32_t) rv->X[fuse[2].rs1] + (uint32_t) fuse[2].imm;
+    rv->X[fuse[3].rd] =
+        (uint32_t) rv->X[fuse[3].rs1] + (uint32_t) fuse[3].imm;
+    rv->X[fuse[4].rd] =
+        (uint32_t) rv->X[fuse[4].rs1] + (uint32_t) fuse[4].imm;
+    rv->X[fuse[5].rd] =
+        (uint32_t) rv->X[fuse[5].rs1] + (uint32_t) fuse[5].imm;
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[6], PC + 24, PC + 28);
+}
+
+/* fused LI + SB + ADDI + ADDI + BNE:
+ * addi value, x0, imm; sb value, off(ptr); addi ptr, ptr, step;
+ * addi count, count, -1; bne count, x0, offset
+ */
+static PRESERVE_NONE bool do_fuse19(riscv_t *rv,
+                                    const rv_insn_t *ir,
+                                    uint64_t cycle,
+                                    uint32_t PC)
+{
+    RVOP_SYNC_PC(rv, PC);
+    cycle += 5;
+    opcode_fuse_t *fuse = ir->fuse;
+
+    rv->X[fuse[0].rd] =
+        (uint32_t) rv->X[fuse[0].rs1] + (uint32_t) fuse[0].imm;
+
+    uint32_t addr = (uint32_t) rv->X[fuse[1].rs1] + (uint32_t) fuse[1].imm;
+    uint32_t value = rv->X[fuse[1].rs2];
+    MEM_WRITE_B(rv, addr, value);
+#if RV32_HAS(ARCH_TEST)
+    check_tohost_write(rv, addr, value);
+#endif
+
+    rv->X[fuse[2].rd] =
+        (uint32_t) rv->X[fuse[2].rs1] + (uint32_t) fuse[2].imm;
+    rv->X[fuse[3].rd] =
+        (uint32_t) rv->X[fuse[3].rs1] + (uint32_t) fuse[3].imm;
+
+    return fuse_branch_finish(rv, ir, cycle, PC, &fuse[4], PC + 16, PC + 20);
 }
 
 /* clang-format off */
@@ -1816,6 +1945,46 @@ static void match_pattern(riscv_t *rv, block_t *block)
             try_fuse_sequence(rv, block, ir, count, rv_insn_fuse3);
 #endif
             break;
+        case rv_insn_sb:
+#if !RV32_HAS(JIT) && !RV32_HAS(SYSTEM)
+            next_ir = ir->next;
+            if (next_ir && IF_insn(next_ir, add)) {
+                rv_insn_t *sub_ir = next_ir->next;
+                rv_insn_t *branch_ir = sub_ir ? sub_ir->next : NULL;
+                if (sub_ir && branch_ir && IF_insn(sub_ir, sub) &&
+                    IF_insn(branch_ir, blt) &&
+                    next_ir->rd != rv_reg_zero &&
+                    sub_ir->rd != rv_reg_zero &&
+                    next_ir->rd == ir->rs1 && next_ir->rs1 == ir->rs1 &&
+                    sub_ir->rs1 == next_ir->rd &&
+                    branch_ir->rs1 == sub_ir->rd) {
+                    struct rv_insn *branch_taken = branch_ir->branch_taken;
+                    struct rv_insn *branch_untaken = branch_ir->branch_untaken;
+                    if (try_fuse_sequence(rv, block, ir, 4, rv_insn_fuse15)) {
+                        ir->branch_taken = branch_taken;
+                        ir->branch_untaken = branch_untaken;
+                        break;
+                    }
+                }
+            }
+#endif
+            break;
+        case rv_insn_lbu:
+#if !RV32_HAS(JIT) && !RV32_HAS(SYSTEM)
+            next_ir = ir->next;
+            if (next_ir && (IF_insn(next_ir, beq) || IF_insn(next_ir, bne)) &&
+                ir->rd != rv_reg_zero &&
+                (ir->rd == next_ir->rs1 || ir->rd == next_ir->rs2)) {
+                struct rv_insn *branch_taken = next_ir->branch_taken;
+                struct rv_insn *branch_untaken = next_ir->branch_untaken;
+                if (try_fuse_sequence(rv, block, ir, 2, rv_insn_fuse16)) {
+                    ir->branch_taken = branch_taken;
+                    ir->branch_untaken = branch_untaken;
+                    break;
+                }
+            }
+#endif
+            break;
         case rv_insn_lw:
             /* Check for LW + ADDI post-increment fusion (fuse11) first.
              * In SYSTEM mode, JIT uses MMU handler for address translation.
@@ -1872,6 +2041,59 @@ static void match_pattern(riscv_t *rv, block_t *block)
             break;
             /* TODO: mixture of SW and LW */
             /* TODO: reorder instruction to match pattern */
+        case rv_insn_add:
+#if !RV32_HAS(JIT) && !RV32_HAS(SYSTEM)
+            next_ir = ir->next;
+            if (next_ir && IF_insn(next_ir, sw)) {
+                rv_insn_t *mv_a_ir = next_ir->next;
+                rv_insn_t *mv_b_ir = mv_a_ir ? mv_a_ir->next : NULL;
+                rv_insn_t *ptr_ir = mv_b_ir ? mv_b_ir->next : NULL;
+                rv_insn_t *count_ir = ptr_ir ? ptr_ir->next : NULL;
+                rv_insn_t *branch_ir = count_ir ? count_ir->next : NULL;
+                if (mv_a_ir && mv_b_ir && ptr_ir && count_ir && branch_ir &&
+                    IF_insn(mv_a_ir, addi) && IF_insn(mv_b_ir, addi) &&
+                    IF_insn(ptr_ir, addi) && IF_insn(count_ir, addi) &&
+                    IF_insn(branch_ir, bne) &&
+                    ir->rd != rv_reg_zero &&
+                    next_ir->rs2 == ir->rd &&
+                    mv_a_ir->imm == 0 && mv_a_ir->rd == ir->rs1 &&
+                    mv_a_ir->rs1 == ir->rs2 &&
+                    mv_b_ir->imm == 0 && mv_b_ir->rd == ir->rs2 &&
+                    mv_b_ir->rs1 == ir->rd &&
+                    ptr_ir->rd != rv_reg_zero && ptr_ir->rd == ptr_ir->rs1 &&
+                    ptr_ir->rd == next_ir->rs1 &&
+                    count_ir->rd != rv_reg_zero &&
+                    count_ir->rd == count_ir->rs1 &&
+                    count_ir->rd == branch_ir->rs1 &&
+                    branch_ir->rs2 == rv_reg_zero) {
+                    struct rv_insn *branch_taken = branch_ir->branch_taken;
+                    struct rv_insn *branch_untaken = branch_ir->branch_untaken;
+                    if (try_fuse_sequence(rv, block, ir, 7, rv_insn_fuse18)) {
+                        ir->branch_taken = branch_taken;
+                        ir->branch_untaken = branch_untaken;
+                        break;
+                    }
+                }
+            }
+            if (next_ir && IF_insn(next_ir, lbu) &&
+                ir->rd != rv_reg_zero && next_ir->rs1 == ir->rd &&
+                next_ir->rd != rv_reg_zero) {
+                rv_insn_t *branch_ir = next_ir->next;
+                if (branch_ir &&
+                    (IF_insn(branch_ir, beq) || IF_insn(branch_ir, bne)) &&
+                    (next_ir->rd == branch_ir->rs1 ||
+                     next_ir->rd == branch_ir->rs2)) {
+                    struct rv_insn *branch_taken = branch_ir->branch_taken;
+                    struct rv_insn *branch_untaken = branch_ir->branch_untaken;
+                    if (try_fuse_sequence(rv, block, ir, 3, rv_insn_fuse17)) {
+                        ir->branch_taken = branch_taken;
+                        ir->branch_untaken = branch_untaken;
+                        break;
+                    }
+                }
+            }
+#endif
+            break;
         case rv_insn_slli:
         case rv_insn_srli:
         case rv_insn_srai:
@@ -1899,6 +2121,31 @@ static void match_pattern(riscv_t *rv, block_t *block)
                 ir->impl = dispatch_table[ir->opcode];
                 remove_next_nth_ir(rv, ir, block, 1);
                 break;
+            }
+#endif
+#if !RV32_HAS(JIT) && !RV32_HAS(SYSTEM)
+            if (ir->rd != rv_reg_zero && ir->rs1 == rv_reg_zero &&
+                next_ir && IF_insn(next_ir, sb) && next_ir->rs2 == ir->rd) {
+                rv_insn_t *ptr_ir = next_ir->next;
+                rv_insn_t *count_ir = ptr_ir ? ptr_ir->next : NULL;
+                rv_insn_t *branch_ir = count_ir ? count_ir->next : NULL;
+                if (ptr_ir && count_ir && branch_ir &&
+                    IF_insn(ptr_ir, addi) && IF_insn(count_ir, addi) &&
+                    IF_insn(branch_ir, bne) &&
+                    ptr_ir->rd != rv_reg_zero && ptr_ir->rd == ptr_ir->rs1 &&
+                    ptr_ir->rd == next_ir->rs1 &&
+                    count_ir->rd != rv_reg_zero &&
+                    count_ir->rd == count_ir->rs1 &&
+                    count_ir->rd == branch_ir->rs1 &&
+                    branch_ir->rs2 == rv_reg_zero) {
+                    struct rv_insn *branch_taken = branch_ir->branch_taken;
+                    struct rv_insn *branch_untaken = branch_ir->branch_untaken;
+                    if (try_fuse_sequence(rv, block, ir, 5, rv_insn_fuse19)) {
+                        ir->branch_taken = branch_taken;
+                        ir->branch_untaken = branch_untaken;
+                        break;
+                    }
+                }
             }
 #endif
 #if !RV32_HAS(JIT)

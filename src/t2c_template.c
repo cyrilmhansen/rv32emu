@@ -1712,3 +1712,13 @@ T2C_OP(fuse12, {
 T2C_OP(fuse13, { __UNREACHABLE; })
 
 T2C_OP(fuse14, { __UNREACHABLE; })
+
+T2C_OP(fuse15, { __UNREACHABLE; })
+
+T2C_OP(fuse16, { __UNREACHABLE; })
+
+T2C_OP(fuse17, { __UNREACHABLE; })
+
+T2C_OP(fuse18, { __UNREACHABLE; })
+
+T2C_OP(fuse19, { __UNREACHABLE; })
